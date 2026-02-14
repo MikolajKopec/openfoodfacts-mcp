@@ -5,7 +5,7 @@ from datetime import date
 from mcp.server.fastmcp import FastMCP
 
 from . import client, storage
-from .models import FoodEntry
+from .models import CustomProduct, FoodEntry
 
 mcp = FastMCP(
     name="OpenFoodFacts Nutrition Tracker",
@@ -125,19 +125,22 @@ async def log_food(
     if meal_type not in valid_meals:
         return f"Nieprawidłowy typ posiłku. Użyj: {', '.join(valid_meals)}"
 
-    # Try barcode first
-    product = None
-    if barcode_or_name.isdigit() and len(barcode_or_name) >= 8:
+    # 1. Check custom products first
+    custom = await storage.find_custom_product(barcode_or_name)
+    product = custom.to_product() if custom else None
+
+    # 2. Try barcode in OpenFoodFacts
+    if not product and barcode_or_name.isdigit() and len(barcode_or_name) >= 8:
         product = await client.get_product(barcode_or_name)
 
-    # Fall back to search
+    # 3. Search OpenFoodFacts by name
     if not product:
         results = await client.search_products(barcode_or_name, page_size=1)
         if results:
             product = results[0]
 
     if not product:
-        return f"Nie znaleziono produktu: '{barcode_or_name}'. Spróbuj inną nazwę lub kod kreskowy."
+        return f"Nie znaleziono produktu: '{barcode_or_name}'. Dodaj go przez add_custom_product."
 
     # Scale nutrients from per-100g to actual amount
     ratio = amount_g / 100.0
@@ -185,6 +188,93 @@ async def delete_food_entry(entry_id: int) -> str:
     if deleted:
         return f"Usunięto wpis #{entry_id}."
     return f"Nie znaleziono wpisu #{entry_id}."
+
+
+# --- Custom products ---
+
+
+@mcp.tool()
+async def add_custom_product(
+    name: str,
+    calories_kcal_100g: float,
+    proteins_g_100g: float = 0,
+    fats_g_100g: float = 0,
+    carbs_g_100g: float = 0,
+    brand: str = "",
+    serving_g: float = 0,
+    sugars_g_100g: float = 0,
+    fiber_g_100g: float = 0,
+) -> str:
+    """Dodaj własny produkt do lokalnej bazy (np. danie z restauracji).
+
+    Wartości odżywcze podaj na 100g. Jeśli znasz wartości na porcję,
+    przelicz: wartość_na_100g = wartość_na_porcję / gramatura_porcji * 100.
+
+    Args:
+        name: Nazwa produktu (np. "Urban Mix Salad Story")
+        calories_kcal_100g: Kalorie na 100g
+        proteins_g_100g: Białko na 100g
+        fats_g_100g: Tłuszcze na 100g
+        carbs_g_100g: Węglowodany na 100g
+        brand: Marka/restauracja (np. "Salad Story")
+        serving_g: Typowa porcja w gramach (opcjonalne)
+        sugars_g_100g: Cukry na 100g (opcjonalne)
+        fiber_g_100g: Błonnik na 100g (opcjonalne)
+    """
+    product = CustomProduct(
+        name=name,
+        brand=brand,
+        serving_g=serving_g or None,
+        calories_kcal_100g=calories_kcal_100g,
+        proteins_g_100g=proteins_g_100g,
+        fats_g_100g=fats_g_100g,
+        carbs_g_100g=carbs_g_100g,
+        sugars_g_100g=sugars_g_100g,
+        fiber_g_100g=fiber_g_100g,
+    )
+    product_id = await storage.add_custom_product(product)
+
+    serving_info = f" | porcja: {serving_g:.0f}g" if serving_g else ""
+    brand_info = f" ({brand})" if brand else ""
+    return (
+        f"Dodano produkt #{product_id}: {name}{brand_info}\n"
+        f"  Per 100g: {calories_kcal_100g:.0f} kcal | "
+        f"B:{proteins_g_100g:.1f} T:{fats_g_100g:.1f} W:{carbs_g_100g:.1f}"
+        f"{serving_info}"
+    )
+
+
+@mcp.tool()
+async def list_custom_products() -> str:
+    """Wyświetl wszystkie własne produkty z lokalnej bazy."""
+    products = await storage.list_custom_products()
+    if not products:
+        return "Brak własnych produktów. Dodaj przez add_custom_product."
+
+    lines = [f"Własne produkty ({len(products)}):\n"]
+    for p in products:
+        brand = f" ({p.brand})" if p.brand else ""
+        serving = f" | porcja: {p.serving_g:.0f}g" if p.serving_g else ""
+        lines.append(
+            f"#{p.id}. **{p.name}**{brand}\n"
+            f"   Per 100g: {p.calories_kcal_100g:.0f} kcal | "
+            f"B:{p.proteins_g_100g:.1f} T:{p.fats_g_100g:.1f} W:{p.carbs_g_100g:.1f}"
+            f"{serving}\n"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def delete_custom_product(product_id: int) -> str:
+    """Usuń własny produkt z lokalnej bazy.
+
+    Args:
+        product_id: ID produktu (widoczne w list_custom_products)
+    """
+    deleted = await storage.delete_custom_product(product_id)
+    if deleted:
+        return f"Usunięto produkt #{product_id}."
+    return f"Nie znaleziono produktu #{product_id}."
 
 
 # --- Summary tools ---

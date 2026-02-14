@@ -6,7 +6,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from .models import DailySummary, FoodEntry
+from .models import CustomProduct, DailySummary, FoodEntry
 
 DB_DIR = Path.home() / ".openfoodfacts-mcp"
 DB_PATH = DB_DIR / "nutrition.db"
@@ -28,6 +28,20 @@ CREATE TABLE IF NOT EXISTS food_log (
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_food_log_date ON food_log(date);
+
+CREATE TABLE IF NOT EXISTS custom_products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    brand TEXT DEFAULT '',
+    serving_g REAL,
+    calories_kcal_100g REAL NOT NULL,
+    proteins_g_100g REAL NOT NULL DEFAULT 0,
+    fats_g_100g REAL NOT NULL DEFAULT 0,
+    carbs_g_100g REAL NOT NULL DEFAULT 0,
+    sugars_g_100g REAL DEFAULT 0,
+    fiber_g_100g REAL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -182,3 +196,96 @@ async def get_weekly_summary() -> str:
         lines.append(f"\nTrend kaloryczny: {trend}")
 
     return "\n".join(lines)
+
+
+# --- Custom products ---
+
+
+async def add_custom_product(product: CustomProduct) -> int:
+    """Insert a custom product and return its ID."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            """INSERT INTO custom_products
+               (name, brand, serving_g, calories_kcal_100g, proteins_g_100g,
+                fats_g_100g, carbs_g_100g, sugars_g_100g, fiber_g_100g)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                product.name,
+                product.brand,
+                product.serving_g,
+                product.calories_kcal_100g,
+                product.proteins_g_100g,
+                product.fats_g_100g,
+                product.carbs_g_100g,
+                product.sugars_g_100g,
+                product.fiber_g_100g,
+            ),
+        )
+        await db.commit()
+        return cursor.lastrowid  # type: ignore[return-value]
+    finally:
+        await db.close()
+
+
+async def find_custom_product(query: str) -> CustomProduct | None:
+    """Search custom products by name (case-insensitive LIKE)."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM custom_products WHERE name LIKE ? ORDER BY name LIMIT 1",
+            (f"%{query}%",),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return CustomProduct(
+            id=row["id"],
+            name=row["name"],
+            brand=row["brand"] or "",
+            serving_g=row["serving_g"],
+            calories_kcal_100g=row["calories_kcal_100g"],
+            proteins_g_100g=row["proteins_g_100g"] or 0,
+            fats_g_100g=row["fats_g_100g"] or 0,
+            carbs_g_100g=row["carbs_g_100g"] or 0,
+            sugars_g_100g=row["sugars_g_100g"] or 0,
+            fiber_g_100g=row["fiber_g_100g"] or 0,
+        )
+    finally:
+        await db.close()
+
+
+async def list_custom_products() -> list[CustomProduct]:
+    """List all custom products."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute("SELECT * FROM custom_products ORDER BY name")
+        rows = await cursor.fetchall()
+        return [
+            CustomProduct(
+                id=row["id"],
+                name=row["name"],
+                brand=row["brand"] or "",
+                serving_g=row["serving_g"],
+                calories_kcal_100g=row["calories_kcal_100g"],
+                proteins_g_100g=row["proteins_g_100g"] or 0,
+                fats_g_100g=row["fats_g_100g"] or 0,
+                carbs_g_100g=row["carbs_g_100g"] or 0,
+                sugars_g_100g=row["sugars_g_100g"] or 0,
+                fiber_g_100g=row["fiber_g_100g"] or 0,
+            )
+            for row in rows
+        ]
+    finally:
+        await db.close()
+
+
+async def delete_custom_product(product_id: int) -> bool:
+    """Delete a custom product by ID."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute("DELETE FROM custom_products WHERE id = ?", (product_id,))
+        await db.commit()
+        return cursor.rowcount > 0  # type: ignore[return-value]
+    finally:
+        await db.close()

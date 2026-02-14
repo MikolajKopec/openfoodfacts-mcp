@@ -63,6 +63,37 @@ class Product(BaseModel):
         return "\n".join(line for line in lines if line is not None)
 
 
+class CustomProduct(BaseModel):
+    id: int = 0
+    name: str
+    brand: str = ""
+    serving_g: float | None = None
+    calories_kcal_100g: float
+    proteins_g_100g: float = 0
+    fats_g_100g: float = 0
+    carbs_g_100g: float = 0
+    sugars_g_100g: float = 0
+    fiber_g_100g: float = 0
+
+    def to_product(self) -> Product:
+        """Convert to Product for unified handling in log_food."""
+        return Product(
+            name=self.name,
+            brands=self.brand,
+            serving_size=f"{self.serving_g:.0f}g" if self.serving_g else "",
+            nutriments=Nutriments(
+                **{
+                    "energy-kcal_100g": self.calories_kcal_100g,
+                    "proteins_100g": self.proteins_g_100g,
+                    "fat_100g": self.fats_g_100g,
+                    "carbohydrates_100g": self.carbs_g_100g,
+                    "sugars_100g": self.sugars_g_100g,
+                    "fiber_100g": self.fiber_g_100g,
+                }
+            ),
+        )
+
+
 class FoodEntry(BaseModel):
     id: int = 0
     date: str = ""
