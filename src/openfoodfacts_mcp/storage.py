@@ -6,7 +6,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from .models import CustomProduct, DailySummary, FoodEntry
+from .models import CustomProduct, DailySummary, FoodEntry, Goals
 
 DB_DIR = Path.home() / ".openfoodfacts-mcp"
 DB_PATH = DB_DIR / "nutrition.db"
@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS food_log (
     created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_food_log_date ON food_log(date);
+
+CREATE TABLE IF NOT EXISTS goals (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    calories_kcal REAL,
+    proteins_g REAL,
+    fats_g REAL,
+    carbs_g REAL
+);
 
 CREATE TABLE IF NOT EXISTS custom_products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,8 +132,9 @@ async def get_entries_for_date(target_date: str) -> list[FoodEntry]:
 
 
 async def get_daily_summary(target_date: str) -> DailySummary:
-    """Get aggregated daily nutrition summary."""
+    """Get aggregated daily nutrition summary with goals progress."""
     entries = await get_entries_for_date(target_date)
+    goals = await get_goals()
     return DailySummary(
         date=target_date,
         total_calories=sum(e.calories_kcal for e in entries),
@@ -135,6 +144,7 @@ async def get_daily_summary(target_date: str) -> DailySummary:
         total_sugars=sum(e.sugars_g for e in entries),
         total_fiber=sum(e.fiber_g for e in entries),
         entries=entries,
+        goals=goals,
     )
 
 
@@ -159,15 +169,23 @@ async def get_weekly_summary() -> str:
     avg_sugar = sum(d.total_sugars for d in active_days) / n
     avg_fiber = sum(d.total_fiber for d in active_days) / n
 
+    goals = await get_goals()
+
+    def vs_goal(avg: float, goal: float | None) -> str:
+        if not goal:
+            return ""
+        pct = avg / goal * 100
+        return f" ({pct:.0f}% celu)"
+
     lines = [
         "# Podsumowanie tygodnia (ostatnie 7 dni)",
         f"Dni z wpisami: {n}/7",
         "",
         f"Średnio dziennie:",
-        f"  Kalorie: **{avg_cal:.0f} kcal**",
-        f"  Białko: **{avg_prot:.1f} g**",
-        f"  Tłuszcze: **{avg_fat:.1f} g**",
-        f"  Węglowodany: **{avg_carb:.1f} g**",
+        f"  Kalorie: **{avg_cal:.0f} kcal**{vs_goal(avg_cal, goals.calories_kcal if goals else None)}",
+        f"  Białko: **{avg_prot:.1f} g**{vs_goal(avg_prot, goals.proteins_g if goals else None)}",
+        f"  Tłuszcze: **{avg_fat:.1f} g**{vs_goal(avg_fat, goals.fats_g if goals else None)}",
+        f"  Węglowodany: **{avg_carb:.1f} g**{vs_goal(avg_carb, goals.carbs_g if goals else None)}",
         f"  Cukry: {avg_sugar:.1f} g",
         f"  Błonnik: {avg_fiber:.1f} g",
         "",
@@ -287,5 +305,103 @@ async def delete_custom_product(product_id: int) -> bool:
         cursor = await db.execute("DELETE FROM custom_products WHERE id = ?", (product_id,))
         await db.commit()
         return cursor.rowcount > 0  # type: ignore[return-value]
+    finally:
+        await db.close()
+
+
+# --- Goals ---
+
+
+async def set_goals(goals: Goals) -> None:
+    """Set or update daily nutrition goals (single row, id=1)."""
+    db = await _get_db()
+    try:
+        await db.execute(
+            """INSERT INTO goals (id, calories_kcal, proteins_g, fats_g, carbs_g)
+               VALUES (1, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 calories_kcal=excluded.calories_kcal,
+                 proteins_g=excluded.proteins_g,
+                 fats_g=excluded.fats_g,
+                 carbs_g=excluded.carbs_g""",
+            (goals.calories_kcal, goals.proteins_g, goals.fats_g, goals.carbs_g),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def get_goals() -> Goals | None:
+    """Get current daily goals, or None if not set."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute("SELECT * FROM goals WHERE id = 1")
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return Goals(
+            calories_kcal=row["calories_kcal"],
+            proteins_g=row["proteins_g"],
+            fats_g=row["fats_g"],
+            carbs_g=row["carbs_g"],
+        )
+    finally:
+        await db.close()
+
+
+# --- Edit entry ---
+
+
+async def update_entry(entry_id: int, amount_g: float | None = None, meal_type: str | None = None) -> FoodEntry | None:
+    """Update an existing food entry's amount (recalculates macros) or meal_type."""
+    db = await _get_db()
+    try:
+        cursor = await db.execute("SELECT * FROM food_log WHERE id = ?", (entry_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+
+        new_amount = amount_g if amount_g is not None else row["amount_g"]
+        new_meal = meal_type if meal_type is not None else row["meal_type"]
+
+        # Recalculate macros if amount changed
+        if amount_g is not None and row["amount_g"] > 0:
+            ratio = new_amount / row["amount_g"]
+            new_cal = (row["calories_kcal"] or 0) * ratio
+            new_prot = (row["proteins_g"] or 0) * ratio
+            new_fat = (row["fats_g"] or 0) * ratio
+            new_carb = (row["carbs_g"] or 0) * ratio
+            new_sugar = (row["sugars_g"] or 0) * ratio
+            new_fiber = (row["fiber_g"] or 0) * ratio
+        else:
+            new_cal = row["calories_kcal"] or 0
+            new_prot = row["proteins_g"] or 0
+            new_fat = row["fats_g"] or 0
+            new_carb = row["carbs_g"] or 0
+            new_sugar = row["sugars_g"] or 0
+            new_fiber = row["fiber_g"] or 0
+
+        await db.execute(
+            """UPDATE food_log SET amount_g=?, meal_type=?,
+               calories_kcal=?, proteins_g=?, fats_g=?, carbs_g=?, sugars_g=?, fiber_g=?
+               WHERE id=?""",
+            (new_amount, new_meal, new_cal, new_prot, new_fat, new_carb, new_sugar, new_fiber, entry_id),
+        )
+        await db.commit()
+
+        return FoodEntry(
+            id=entry_id,
+            date=row["date"],
+            meal_type=new_meal,
+            product_name=row["product_name"],
+            barcode=row["barcode"],
+            amount_g=new_amount,
+            calories_kcal=new_cal,
+            proteins_g=new_prot,
+            fats_g=new_fat,
+            carbs_g=new_carb,
+            sugars_g=new_sugar,
+            fiber_g=new_fiber,
+        )
     finally:
         await db.close()

@@ -5,7 +5,7 @@ from datetime import date
 from mcp.server.fastmcp import FastMCP
 
 from . import client, storage
-from .models import CustomProduct, FoodEntry
+from .models import CustomProduct, FoodEntry, Goals
 
 mcp = FastMCP(
     name="OpenFoodFacts Nutrition Tracker",
@@ -178,6 +178,90 @@ async def log_food(
 
 
 @mcp.tool()
+async def log_quick(
+    name: str,
+    amount_g: float,
+    calories_kcal: float,
+    proteins_g: float = 0,
+    fats_g: float = 0,
+    carbs_g: float = 0,
+    meal_type: str = "snack",
+) -> str:
+    """Szybki wpis z ręcznymi wartościami odżywczymi (bez szukania w bazie).
+
+    Podaj wartości na CAŁĄ porcję (nie na 100g).
+
+    Args:
+        name: Nazwa posiłku (np. "kebab duży", "domowa zupa")
+        amount_g: Waga porcji w gramach
+        calories_kcal: Kalorie w całej porcji
+        proteins_g: Białko w całej porcji
+        fats_g: Tłuszcze w całej porcji
+        carbs_g: Węglowodany w całej porcji
+        meal_type: Typ posiłku: breakfast, lunch, dinner, snack
+    """
+    meal_type = meal_type.lower()
+    valid_meals = {"breakfast", "lunch", "dinner", "snack"}
+    if meal_type not in valid_meals:
+        return f"Nieprawidłowy typ posiłku. Użyj: {', '.join(valid_meals)}"
+
+    entry = FoodEntry(
+        date=date.today().isoformat(),
+        meal_type=meal_type,
+        product_name=name,
+        amount_g=amount_g,
+        calories_kcal=calories_kcal,
+        proteins_g=proteins_g,
+        fats_g=fats_g,
+        carbs_g=carbs_g,
+    )
+    entry_id = await storage.log_food(entry)
+
+    meal_names = {
+        "breakfast": "śniadanie", "lunch": "obiad",
+        "dinner": "kolacja", "snack": "przekąska",
+    }
+    return (
+        f"Zapisano (ID: {entry_id}):\n"
+        f"  {name} — {amount_g:.0f}g ({meal_names[meal_type]})\n"
+        f"  {calories_kcal:.0f} kcal | B:{proteins_g:.1f} T:{fats_g:.1f} W:{carbs_g:.1f}"
+    )
+
+
+@mcp.tool()
+async def edit_food_entry(
+    entry_id: int,
+    amount_g: float | None = None,
+    meal_type: str | None = None,
+) -> str:
+    """Edytuj istniejący wpis (zmień gramaturę lub typ posiłku).
+
+    Zmiana gramatury automatycznie przelicza makro proporcjonalnie.
+
+    Args:
+        entry_id: ID wpisu do edycji
+        amount_g: Nowa waga w gramach (opcjonalne)
+        meal_type: Nowy typ posiłku (opcjonalne)
+    """
+    if amount_g is None and meal_type is None:
+        return "Podaj amount_g i/lub meal_type do zmiany."
+
+    if meal_type and meal_type.lower() not in {"breakfast", "lunch", "dinner", "snack"}:
+        return "Nieprawidłowy typ posiłku."
+
+    updated = await storage.update_entry(entry_id, amount_g, meal_type.lower() if meal_type else None)
+    if not updated:
+        return f"Nie znaleziono wpisu #{entry_id}."
+
+    return (
+        f"Zaktualizowano #{entry_id}:\n"
+        f"  {updated.product_name} — {updated.amount_g:.0f}g ({updated.meal_type})\n"
+        f"  {updated.calories_kcal:.0f} kcal | "
+        f"B:{updated.proteins_g:.1f} T:{updated.fats_g:.1f} W:{updated.carbs_g:.1f}"
+    )
+
+
+@mcp.tool()
 async def delete_food_entry(entry_id: int) -> str:
     """Usuń wpis z dziennika żywieniowego.
 
@@ -275,6 +359,46 @@ async def delete_custom_product(product_id: int) -> str:
     if deleted:
         return f"Usunięto produkt #{product_id}."
     return f"Nie znaleziono produktu #{product_id}."
+
+
+# --- Goals ---
+
+
+@mcp.tool()
+async def set_goals(
+    calories_kcal: float | None = None,
+    proteins_g: float | None = None,
+    fats_g: float | None = None,
+    carbs_g: float | None = None,
+) -> str:
+    """Ustaw dzienne cele żywieniowe.
+
+    Podaj tylko te wartości które chcesz ustawić. Reszta zostanie zachowana.
+
+    Args:
+        calories_kcal: Cel kalorii dziennie (np. 2000)
+        proteins_g: Cel białka dziennie w gramach (np. 120)
+        fats_g: Cel tłuszczów dziennie w gramach (np. 70)
+        carbs_g: Cel węglowodanów dziennie w gramach (np. 250)
+    """
+    current = await storage.get_goals()
+    goals = Goals(
+        calories_kcal=calories_kcal if calories_kcal is not None else (current.calories_kcal if current else None),
+        proteins_g=proteins_g if proteins_g is not None else (current.proteins_g if current else None),
+        fats_g=fats_g if fats_g is not None else (current.fats_g if current else None),
+        carbs_g=carbs_g if carbs_g is not None else (current.carbs_g if current else None),
+    )
+    await storage.set_goals(goals)
+    return f"Cele ustawione: {goals.format()}"
+
+
+@mcp.tool()
+async def get_goals() -> str:
+    """Pokaż aktualne cele żywieniowe."""
+    goals = await storage.get_goals()
+    if not goals:
+        return "Brak ustawionych celów. Użyj set_goals żeby ustawić."
+    return f"Twoje cele: {goals.format()}"
 
 
 # --- Summary tools ---

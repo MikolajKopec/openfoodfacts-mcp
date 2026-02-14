@@ -94,6 +94,25 @@ class CustomProduct(BaseModel):
         )
 
 
+class Goals(BaseModel):
+    calories_kcal: float | None = None
+    proteins_g: float | None = None
+    fats_g: float | None = None
+    carbs_g: float | None = None
+
+    def format(self) -> str:
+        parts = []
+        if self.calories_kcal:
+            parts.append(f"Kalorie: {self.calories_kcal:.0f} kcal")
+        if self.proteins_g:
+            parts.append(f"Białko: {self.proteins_g:.0f} g")
+        if self.fats_g:
+            parts.append(f"Tłuszcze: {self.fats_g:.0f} g")
+        if self.carbs_g:
+            parts.append(f"Węglowodany: {self.carbs_g:.0f} g")
+        return " | ".join(parts) if parts else "Brak celów"
+
+
 class FoodEntry(BaseModel):
     id: int = 0
     date: str = ""
@@ -118,15 +137,31 @@ class DailySummary(BaseModel):
     total_sugars: float = 0
     total_fiber: float = 0
     entries: list[FoodEntry] = Field(default_factory=list)
+    goals: Goals | None = None
+
+    def _pct(self, current: float, goal: float | None) -> str:
+        if not goal:
+            return ""
+        pct = current / goal * 100
+        return f" ({pct:.0f}%)"
+
+    def _remaining(self, current: float, goal: float | None) -> str:
+        if not goal:
+            return ""
+        left = goal - current
+        if left <= 0:
+            return " [CEL]"
+        return f" (zostało {left:.0f})"
 
     def format(self) -> str:
+        g = self.goals
         lines = [
             f"# Podsumowanie dnia: {self.date}",
             "",
-            f"Kalorie: **{self.total_calories:.0f} kcal**",
-            f"Białko: **{self.total_proteins:.1f} g**",
-            f"Tłuszcze: **{self.total_fats:.1f} g**",
-            f"Węglowodany: **{self.total_carbs:.1f} g**",
+            f"Kalorie: **{self.total_calories:.0f} kcal**{self._pct(self.total_calories, g.calories_kcal if g else None)}{self._remaining(self.total_calories, g.calories_kcal if g else None)}",
+            f"Białko: **{self.total_proteins:.1f} g**{self._pct(self.total_proteins, g.proteins_g if g else None)}{self._remaining(self.total_proteins, g.proteins_g if g else None)}",
+            f"Tłuszcze: **{self.total_fats:.1f} g**{self._pct(self.total_fats, g.fats_g if g else None)}{self._remaining(self.total_fats, g.fats_g if g else None)}",
+            f"Węglowodany: **{self.total_carbs:.1f} g**{self._pct(self.total_carbs, g.carbs_g if g else None)}{self._remaining(self.total_carbs, g.carbs_g if g else None)}",
             f"Cukry: {self.total_sugars:.1f} g",
             f"Błonnik: {self.total_fiber:.1f} g",
             "",
